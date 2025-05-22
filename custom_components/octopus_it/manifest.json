@@ -1,0 +1,14 @@
+{
+  "domain": "octopus_it",
+  "name": "Octopus Energy Italy",
+  "version": "0.1.0",
+  "documentation": "https://github.com/fuomag9/HomeAssistant-OctopusEnergy-Italy",
+  "requirements": [
+    "aiohttp>=3.7.4",
+    "graphql-core>=3.2.0"
+  ],
+  "dependencies": [],
+  "codeowners": ["@fuomag9"],
+  "config_flow": true,
+  "iot_class": "cloud_polling"
+}
