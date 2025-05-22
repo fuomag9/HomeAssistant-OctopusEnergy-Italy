@@ -13,7 +13,7 @@ Custom component built from the ground up to bring your Octopus Energy details i
 
 # Warnings:
 - ### Currently it only supports the first house automatically.
-- ### Currently it does not have a way to specify that the data it gathers it's in the past because I suck at developing for home assistant (PLEASE HELP THIS CODE WORKS BY MIRACLES)
+- ### Currently it does not have a way to specify that the data it gathers it's in the past (currently octopus APIs return data from -2 days in the past) because I suck at developing for home assistant (PLEASE HELP THIS CODE WORKS BY MIRACLES)
 
 This integration is in no way affiliated with Octopus Energy.
 
