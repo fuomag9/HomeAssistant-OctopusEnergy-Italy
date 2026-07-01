@@ -1,4 +1,4 @@
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -29,7 +29,10 @@ class OctopusSensor(CoordinatorEntity, SensorEntity):
         self._sensor_key = sensor_key
         self._attr_name = f"Octopus IT {friendly_name}"
         self._attr_unique_id = f"{entry_id}_{sensor_key}"
-        self._attr_unit_of_measurement = unit
+        self._attr_icon = "mdi:flash"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def state(self):

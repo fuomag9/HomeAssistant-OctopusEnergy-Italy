@@ -85,7 +85,6 @@ class OctopusCoordinator(DataUpdateCoordinator):
             token_data = data["data"]["obtainKrakenToken"]
             self._token = token_data["token"]
             self._token_expiry = token_data["refreshExpiresIn"]
-            _LOGGER.info(self._token,self._token_expiry)
             self._account_number = await self._get_account_list()
             return self._token
         except Exception as e:
@@ -189,19 +188,16 @@ class OctopusCoordinator(DataUpdateCoordinator):
         msp_id = await self._async_get_market_supply_point()
 
         now = datetime.now(timezone.utc)
-        start_at = (now - timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_at = start_at + timedelta(days=1)
-
-        iso_start = start_at.isoformat().replace("+00:00", "Z")
-        iso_end = end_at.isoformat().replace("+00:00", "Z")
+        end_at = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_at = end_at - timedelta(days=7)
 
         payload = {
             "operationName": "GetSmartUsage",
             "variables": {
                 "propertyId": property_id,
                 "timezone": "Europe/Rome",
-                "startAt": iso_start,
-                "endAt": iso_end,
+                "startAt": start_at.isoformat().replace("+00:00", "Z"),
+                "endAt": end_at.isoformat().replace("+00:00", "Z"),
                 "utilityFilters": [
                     {
                         "electricityFilters": {
@@ -229,6 +225,7 @@ class OctopusCoordinator(DataUpdateCoordinator):
 
             node = edges[-1]["node"]
             total = float(node.get("value", 0.0))
+            measurement_date = node.get("startAt", "")
             stats = node.get("metaData", {}).get("statistics", [])
             f_values = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
             for entry in stats:
@@ -242,6 +239,7 @@ class OctopusCoordinator(DataUpdateCoordinator):
                 "daily_f1": f_values["F1"],
                 "daily_f2": f_values["F2"],
                 "daily_f3": f_values["F3"],
+                "measurement_date": measurement_date,
             }
         except Exception as e:
             raise UpdateFailed(f"Error parsing usage data: {e}")
