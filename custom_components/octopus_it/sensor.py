@@ -1,4 +1,4 @@
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -32,7 +32,6 @@ class OctopusSensor(CoordinatorEntity, SensorEntity):
         self._attr_icon = "mdi:flash"
         self._attr_native_unit_of_measurement = unit
         self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def state(self):
@@ -43,8 +42,12 @@ class OctopusSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        """Optionally expose additional attributes (e.g. last update timestamp)."""
-        return {"last_updated": self.coordinator.last_update_success}
+        """Expose the day the reported value belongs to, which lags behind today."""
+        data = self.coordinator.data or {}
+        return {
+            "last_updated": self.coordinator.last_update_success,
+            "measurement_date": data.get("measurement_date"),
+        }
 
     async def async_update(self):
         """Disabled because we let the coordinator do the polling."""

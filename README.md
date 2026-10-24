@@ -7,13 +7,13 @@
     - [HACS](#hacs)
     - [Manual](#manual)
   - [How to setup](#how-to-setup)
+  - [Delayed data and the Energy dashboard](#delayed-data-and-the-energy-dashboard)
   - [FAQ](#faq)
 
 Custom component built from the ground up to bring your Octopus Energy details into Home Assistant to help you towards a more energy efficient (and or cheaper) home. This integration is built against the API provided by Octopus Energy IT only.
 
 # Warnings:
 - ### Currently it only supports the first house automatically.
-- ### Currently it does not have a way to specify that the data it gathers it's in the past (currently octopus APIs return data from -2 days in the past) because I suck at developing for home assistant (PLEASE HELP THIS CODE WORKS BY MIRACLES)
 
 This integration is in no way affiliated with Octopus Energy.
 
@@ -21,7 +21,8 @@ This integration is in no way affiliated with Octopus Energy.
 
 Below are the main features of the integration
 
-* Electricity support including consumption data
+* Electricity support including consumption data, in total and split by F1/F2/F3 band
+* Daily readings imported as long-term statistics on the day they were consumed (see [Delayed data](#delayed-data-and-the-energy-dashboard))
 
 ## How to install
 
@@ -41,6 +42,26 @@ This integration can be installed directly via HACS. To install:
 You should take the latest [published release](https://github.com/fuomag9/HomeAssistant-OctopusEnergy-Italy/releases). The current state of `develop` will be in flux and therefore possibly subject to change.
 
 To install, place the contents of `custom_components` into the `<config directory>/custom_components` folder of your Home Assistant installation. Once installed, remember to restart your home assistant instance for the integration to be picked up.
+
+## Delayed data and the Energy dashboard
+
+Octopus Energy Italy publishes smart meter readings with a delay (currently about two days). A sensor can only hold a value "now", so the `Octopus IT Daily ...` sensors always show the most recent complete day available. The day that value belongs to is exposed in their `measurement_date` attribute.
+
+To keep the history on the correct days, the integration also imports the last 30 days of readings as long-term statistics, stamped with the day they were actually consumed. They are refreshed on every update, so late corrections from Octopus are picked up. One statistic is created per sensor:
+
+| Statistic | Content |
+| --- | --- |
+| `Octopus IT Daily Total` | Total consumption |
+| `Octopus IT Daily F1` / `F2` / `F3` | Consumption per band |
+
+Use these statistics, not the sensor entities, wherever the date matters:
+
+* **Energy dashboard**: *Settings > Dashboards > Energy > Add consumption* and pick `Octopus IT Daily Total`.
+* **Statistics graph card**: select the same statistics by name.
+
+Readings are daily, so each day's consumption appears as a single bar at the start of that day and the hourly breakdown is not available.
+
+The sensors no longer record their own statistics, as these would be dated when they were polled rather than when the energy was used. If you used them in the Energy dashboard before, replace them with the statistics above. Home Assistant may also offer to remove the old statistics under *Developer tools > Statistics*.
 
 ## FAQ
 

@@ -1,10 +1,14 @@
+import base64
+import json
 import logging
+import time
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -14,10 +18,26 @@ from .const import (
     GET_METERS_QUERY,
     GET_SMART_USAGE_QUERY,
     DEFAULT_SCAN_INTERVAL,
+    HISTORY_DAYS,
     SENSOR_TYPES, GET_ACCOUNT_LIST_QUERY,
+    TIMEZONE,
 )
+from .statistics import async_import_statistics, parse_daily_readings
 
 _LOGGER = logging.getLogger(__name__)
+
+TOKEN_EXPIRY_MARGIN = 60  # seconds before `exp` at which we stop using a token
+FALLBACK_TOKEN_LIFETIME = 30 * 60  # seconds, used if the token can't be decoded
+
+
+def token_expires_at(token: str) -> float:
+    """Return the time (unix seconds) at which a JWT should no longer be used."""
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return float(claims["exp"]) - TOKEN_EXPIRY_MARGIN
+    except (IndexError, KeyError, TypeError, ValueError):
+        return time.time() + FALLBACK_TOKEN_LIFETIME
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -59,16 +79,17 @@ class OctopusCoordinator(DataUpdateCoordinator):
         self._email = email
         self._password = password
         self._token = None
-        self._token_expiry = None
+        self._token_expires_at = 0.0
         self._account_number = None
         self._property_id = None
         self._market_supply_point_id = None
+        self._timezone = None
 
     async def _async_get_token(self):
         """Obtain or refresh JWT token."""
         import aiohttp
 
-        if self._token and self._token_expiry:
+        if self._token and time.time() < self._token_expires_at:
             return self._token
 
         payload = {
@@ -84,7 +105,7 @@ class OctopusCoordinator(DataUpdateCoordinator):
         try:
             token_data = data["data"]["obtainKrakenToken"]
             self._token = token_data["token"]
-            self._token_expiry = token_data["refreshExpiresIn"]
+            self._token_expires_at = token_expires_at(self._token)
             self._account_number = await self._get_account_list()
             return self._token
         except Exception as e:
@@ -179,23 +200,31 @@ class OctopusCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error parsing meters: {e}")
 
     async def _async_fetch_usage(self):
-        """Fetch the last 1 day of usage, broken out by F1/F2/F3."""
+        """Fetch the last HISTORY_DAYS of daily usage, broken out by F1/F2/F3."""
         import aiohttp
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         token = await self._async_get_token()
         property_id = await self._async_get_property_id()
         msp_id = await self._async_get_market_supply_point()
 
-        now = datetime.now(timezone.utc)
-        end_at = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_at = end_at - timedelta(days=7)
+        if self._timezone is None:
+            self._timezone = await self.hass.async_add_executor_job(
+                dt_util.get_time_zone, TIMEZONE
+            )
+
+        # Align the window to local midnights so every returned day is complete.
+        today = datetime.now(self._timezone).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end_at = dt_util.as_utc(today)
+        start_at = dt_util.as_utc(today - timedelta(days=HISTORY_DAYS))
 
         payload = {
             "operationName": "GetSmartUsage",
             "variables": {
                 "propertyId": property_id,
-                "timezone": "Europe/Rome",
+                "timezone": TIMEZONE,
                 "startAt": start_at.isoformat().replace("+00:00", "Z"),
                 "endAt": end_at.isoformat().replace("+00:00", "Z"),
                 "utilityFilters": [
@@ -220,30 +249,28 @@ class OctopusCoordinator(DataUpdateCoordinator):
 
         try:
             edges = data["data"]["property"]["measurements"]["edges"]
-            if not edges:
-                return {k: 0.0 for k in SENSOR_TYPES.keys()}
-
-            node = edges[-1]["node"]
-            total = float(node.get("value", 0.0))
-            measurement_date = node.get("startAt", "")
-            stats = node.get("metaData", {}).get("statistics", [])
-            f_values = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
-            for entry in stats:
-                label = entry.get("label")
-                val = float(entry.get("value", 0.0))
-                if label in f_values:
-                    f_values[label] = val
-
-            return {
-                "daily_total": total,
-                "daily_f1": f_values["F1"],
-                "daily_f2": f_values["F2"],
-                "daily_f3": f_values["F3"],
-                "measurement_date": measurement_date,
-            }
+            readings = parse_daily_readings(edges, self._timezone)
         except Exception as e:
             raise UpdateFailed(f"Error parsing usage data: {e}")
 
+        if not readings:
+            return {
+                **{k: 0.0 for k in SENSOR_TYPES.keys()},
+                "measurement_date": None,
+                "readings": [],
+            }
+
+        latest = readings[-1]
+        return {
+            **{k: latest[k] for k in SENSOR_TYPES.keys()},
+            "measurement_date": latest["start"].astimezone(self._timezone).date().isoformat(),
+            "readings": readings,
+        }
+
     async def _async_update_data(self):
-        """Fetch data from the API and return a dict of latest values."""
-        return await self._async_fetch_usage()
+        """Fetch the readings, import them as statistics and return the latest values."""
+        data = await self._async_fetch_usage()
+        await async_import_statistics(
+            self.hass, self._account_number, data["readings"]
+        )
+        return data

@@ -109,6 +109,12 @@ query GetSmartUsage(
 # Default refresh interval (in seconds):
 DEFAULT_SCAN_INTERVAL = 3600  # 1 hour
 
+# Timezone used to align daily readings with the Italian calendar day.
+TIMEZONE = "Europe/Rome"
+
+# Days of readings fetched (and re-imported as statistics) on every refresh.
+HISTORY_DAYS = 30
+
 # Sensor types: key -> (name, unit, attribute_key)
 SENSOR_TYPES = {
     "daily_total": ["Daily Total", "kWh", None],
