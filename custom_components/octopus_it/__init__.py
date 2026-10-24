@@ -1,10 +1,15 @@
+import base64
+import json
 import logging
+import time
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -13,11 +18,32 @@ from .const import (
     GET_PROPERTIES_QUERY,
     GET_METERS_QUERY,
     GET_SMART_USAGE_QUERY,
+    GET_GAS_SUPPLY_POINTS_QUERY,
+    GET_GAS_READINGS_QUERY,
     DEFAULT_SCAN_INTERVAL,
+    GAS_HISTORY_DAYS,
+    GAS_SCAN_INTERVAL,
+    HISTORY_DAYS,
     SENSOR_TYPES, GET_ACCOUNT_LIST_QUERY,
+    TIMEZONE,
 )
+from .gas import async_import_gas_statistics, parse_gas_readings
+from .statistics import async_import_statistics, parse_daily_readings
 
 _LOGGER = logging.getLogger(__name__)
+
+TOKEN_EXPIRY_MARGIN = 60  # seconds before `exp` at which we stop using a token
+FALLBACK_TOKEN_LIFETIME = 30 * 60  # seconds, used if the token can't be decoded
+
+
+def token_expires_at(token: str) -> float:
+    """Return the time (unix seconds) at which a JWT should no longer be used."""
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return float(claims["exp"]) - TOKEN_EXPIRY_MARGIN
+    except (IndexError, KeyError, TypeError, ValueError):
+        return time.time() + FALLBACK_TOKEN_LIFETIME
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -32,6 +58,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    async def import_gas(_now=None):
+        # Gas is optional, so a failure here must never affect the electricity sensors.
+        try:
+            await coordinator.async_import_gas_statistics()
+        except Exception:
+            _LOGGER.warning("Could not import gas readings", exc_info=True)
+
+    entry.async_create_background_task(hass, import_gas(), "octopus_it_gas_import")
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, import_gas, timedelta(seconds=GAS_SCAN_INTERVAL)
+        )
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
     return True
@@ -59,16 +99,25 @@ class OctopusCoordinator(DataUpdateCoordinator):
         self._email = email
         self._password = password
         self._token = None
-        self._token_expiry = None
+        self._token_expires_at = 0.0
         self._account_number = None
         self._property_id = None
         self._market_supply_point_id = None
+        self._timezone = None
+        self._gas_pdr = None
+
+    async def _async_get_timezone(self):
+        if self._timezone is None:
+            self._timezone = await self.hass.async_add_executor_job(
+                dt_util.get_time_zone, TIMEZONE
+            )
+        return self._timezone
 
     async def _async_get_token(self):
         """Obtain or refresh JWT token."""
         import aiohttp
 
-        if self._token and self._token_expiry:
+        if self._token and time.time() < self._token_expires_at:
             return self._token
 
         payload = {
@@ -84,7 +133,7 @@ class OctopusCoordinator(DataUpdateCoordinator):
         try:
             token_data = data["data"]["obtainKrakenToken"]
             self._token = token_data["token"]
-            self._token_expiry = token_data["refreshExpiresIn"]
+            self._token_expires_at = token_expires_at(self._token)
             self._account_number = await self._get_account_list()
             return self._token
         except Exception as e:
@@ -179,23 +228,28 @@ class OctopusCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error parsing meters: {e}")
 
     async def _async_fetch_usage(self):
-        """Fetch the last 1 day of usage, broken out by F1/F2/F3."""
+        """Fetch the last HISTORY_DAYS of daily usage, broken out by F1/F2/F3."""
         import aiohttp
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         token = await self._async_get_token()
         property_id = await self._async_get_property_id()
         msp_id = await self._async_get_market_supply_point()
 
-        now = datetime.now(timezone.utc)
-        end_at = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_at = end_at - timedelta(days=7)
+        await self._async_get_timezone()
+
+        # Align the window to local midnights so every returned day is complete.
+        today = datetime.now(self._timezone).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end_at = dt_util.as_utc(today)
+        start_at = dt_util.as_utc(today - timedelta(days=HISTORY_DAYS))
 
         payload = {
             "operationName": "GetSmartUsage",
             "variables": {
                 "propertyId": property_id,
-                "timezone": "Europe/Rome",
+                "timezone": TIMEZONE,
                 "startAt": start_at.isoformat().replace("+00:00", "Z"),
                 "endAt": end_at.isoformat().replace("+00:00", "Z"),
                 "utilityFilters": [
@@ -220,30 +274,98 @@ class OctopusCoordinator(DataUpdateCoordinator):
 
         try:
             edges = data["data"]["property"]["measurements"]["edges"]
-            if not edges:
-                return {k: 0.0 for k in SENSOR_TYPES.keys()}
-
-            node = edges[-1]["node"]
-            total = float(node.get("value", 0.0))
-            measurement_date = node.get("startAt", "")
-            stats = node.get("metaData", {}).get("statistics", [])
-            f_values = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
-            for entry in stats:
-                label = entry.get("label")
-                val = float(entry.get("value", 0.0))
-                if label in f_values:
-                    f_values[label] = val
-
-            return {
-                "daily_total": total,
-                "daily_f1": f_values["F1"],
-                "daily_f2": f_values["F2"],
-                "daily_f3": f_values["F3"],
-                "measurement_date": measurement_date,
-            }
+            readings = parse_daily_readings(edges, self._timezone)
         except Exception as e:
             raise UpdateFailed(f"Error parsing usage data: {e}")
 
+        if not readings:
+            return {
+                **{k: 0.0 for k in SENSOR_TYPES.keys()},
+                "measurement_date": None,
+                "readings": [],
+            }
+
+        latest = readings[-1]
+        return {
+            **{k: latest[k] for k in SENSOR_TYPES.keys()},
+            "measurement_date": latest["start"].astimezone(self._timezone).date().isoformat(),
+            "readings": readings,
+        }
+
     async def _async_update_data(self):
-        """Fetch data from the API and return a dict of latest values."""
-        return await self._async_fetch_usage()
+        """Fetch the readings, import them as statistics and return the latest values."""
+        data = await self._async_fetch_usage()
+        await async_import_statistics(
+            self.hass, self._account_number, data["readings"]
+        )
+        return data
+
+    async def _async_get_gas_pdr(self):
+        """Return the PDR of the gas supply point, or None if there is no gas supply."""
+        if self._gas_pdr:
+            return self._gas_pdr
+
+        import aiohttp
+
+        token = await self._async_get_token()
+        property_id = await self._async_get_property_id()
+        payload = {
+            "operationName": "GetGasSupplyPoints",
+            "variables": {"propertyId": property_id},
+            "query": GET_GAS_SUPPLY_POINTS_QUERY,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                API_BASE, json=payload, headers={"Authorization": token}
+            ) as resp:
+                if resp.status != 200:
+                    raise UpdateFailed(f"Failed to get gas supply points: HTTP {resp.status}")
+                data = await resp.json()
+
+        try:
+            points = data["data"]["property"]["gasSupplyPoints"]
+            smart = [p for p in points if p.get("isSmartMeter")]
+            chosen = (smart or points or [None])[0]
+            self._gas_pdr = chosen["pdr"] if chosen else None
+            return self._gas_pdr
+        except Exception as e:
+            raise UpdateFailed(f"Error parsing gas supply points: {e}")
+
+    async def async_import_gas_statistics(self):
+        """Import monthly gas readings as statistics; does nothing without a gas supply."""
+        import aiohttp
+        from datetime import datetime
+
+        pdr = await self._async_get_gas_pdr()
+        if pdr is None:
+            return
+
+        token = await self._async_get_token()
+        timezone = await self._async_get_timezone()
+        today = datetime.now(timezone).date()
+        payload = {
+            "operationName": "GetGasReadings",
+            "variables": {
+                "accountNumber": self._account_number,
+                "pdr": pdr,
+                "dateFrom": (today - timedelta(days=GAS_HISTORY_DAYS)).isoformat(),
+                "dateTo": today.isoformat(),
+            },
+            "query": GET_GAS_READINGS_QUERY,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                API_BASE, json=payload, headers={"Authorization": token}
+            ) as resp:
+                if resp.status != 200:
+                    raise UpdateFailed(f"Failed to get gas readings: HTTP {resp.status}")
+                data = await resp.json()
+
+        try:
+            readings = parse_gas_readings(data["data"]["gasMeterReadings"]["edges"])
+        except Exception as e:
+            raise UpdateFailed(f"Error parsing gas readings: {e}")
+
+        await async_import_gas_statistics(
+            self.hass, self._account_number, readings, timezone
+        )

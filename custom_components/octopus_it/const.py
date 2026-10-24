@@ -105,9 +105,53 @@ query GetSmartUsage(
 }
 """
 
+GET_GAS_SUPPLY_POINTS_QUERY = """
+query GetGasSupplyPoints($propertyId: ID!) {
+  property(id: $propertyId) {
+    gasSupplyPoints {
+      pdr
+      isSmartMeter
+    }
+  }
+}
+"""
+
+# consumptionValue is the cumulative meter index in m3, despite its name.
+GET_GAS_READINGS_QUERY = """
+query GetGasReadings($accountNumber: String!, $pdr: String!, $dateFrom: Date, $dateTo: Date) {
+  gasMeterReadings(
+    accountNumber: $accountNumber,
+    pdr: $pdr,
+    dateFrom: $dateFrom,
+    dateTo: $dateTo,
+    first: 100
+  ) {
+    edges {
+      node {
+        readingDate
+        readingType
+        consumptionValue
+      }
+    }
+  }
+}
+"""
+
 
 # Default refresh interval (in seconds):
 DEFAULT_SCAN_INTERVAL = 3600  # 1 hour
+
+# Gas readings arrive about once a month, so they are checked far less often.
+GAS_SCAN_INTERVAL = 12 * 3600
+
+# Days of gas readings fetched (and re-imported as statistics) on every refresh.
+GAS_HISTORY_DAYS = 730
+
+# Timezone used to align daily readings with the Italian calendar day.
+TIMEZONE = "Europe/Rome"
+
+# Days of readings fetched (and re-imported as statistics) on every refresh.
+HISTORY_DAYS = 30
 
 # Sensor types: key -> (name, unit, attribute_key)
 SENSOR_TYPES = {
